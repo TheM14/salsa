@@ -2,13 +2,12 @@
 
 use eac3joc::{
     BedPlan, Eac3JocFrame, FRAME_SAMPLES, JocParams, MAX_OBJECTS, compute_bed_plan_for_config,
-    num_channels_for_config,
 };
 use objectaudio_ir::{IrError, ObjectState, PcmBuffer, SpatialDecoder, SpatialFrame};
 use objectaudio_oamd::BedPolicy;
 use thiserror::Error;
 
-use crate::kernel::{JocKernel, KernelError, OUTPUT_CHANNELS};
+use crate::kernel::{JocFrame, JocKernel, KernelError, OUTPUT_CHANNELS};
 use eac3joc_core_decoder::{CoreDecoder, CoreDecoderError, CorePcm, select_lanes};
 
 #[derive(Debug, Error)]
@@ -93,7 +92,7 @@ impl Eac3JocDecoder {
     fn resolve_bed_plan(
         &mut self,
         frame: &Eac3JocFrame,
-        params: &JocParams,
+        joc: Option<&JocParams>,
     ) -> Result<BedPlan, DspError> {
         if let Some(plan) = frame.bed_plan {
             self.last_bed_plan = Some(plan);
@@ -102,8 +101,8 @@ impl Eac3JocDecoder {
         if let Some(plan) = self.last_bed_plan {
             return Ok(plan);
         }
-        let plan = compute_bed_plan_for_config(params.dmx_config_idx)
-            .map_err(|_| DspError::MissingBedPlan)?;
+        let config = joc.map_or(self.last_config, |params| params.dmx_config_idx);
+        let plan = compute_bed_plan_for_config(config).map_err(|_| DspError::MissingBedPlan)?;
         self.last_bed_plan = Some(plan);
         Ok(plan)
     }
@@ -114,32 +113,26 @@ impl SpatialDecoder for Eac3JocDecoder {
     type Error = DspError;
 
     fn decode(&mut self, frame: &Self::Frame) -> Result<SpatialFrame, Self::Error> {
-        let silent;
-        let params: &JocParams = if let Some(joc) = &frame.joc {
+        let joc = frame.joc.as_deref();
+        if let Some(joc) = joc {
             self.last_config = joc.dmx_config_idx;
-            joc
-        } else {
-            let mut params = JocParams::silent();
-            params.dmx_config_idx = self.last_config;
-            params.n_channels = frame
-                .bed_plan
-                .or(self.last_bed_plan)
-                .map(|plan| plan.core_channels() as u8)
-                .unwrap_or_else(|| {
-                    num_channels_for_config(u32::from(self.last_config)).unwrap_or(5)
-                });
-            silent = Box::new(params);
-            silent.as_ref()
+        }
+        // The payload declares the core channel count; a frame without one takes
+        // it from the bed plan the stream established.
+        let plan = self.resolve_bed_plan(frame, joc)?;
+        let core_channels = match joc {
+            Some(joc) => usize::from(joc.n_channels),
+            None => plan.core_channels(),
         };
-        let core_channels = usize::from(params.n_channels);
-        let object_count = if frame.joc.is_some() {
-            let count = usize::from(params.n_objects).min(MAX_OBJECTS);
+        let object_count = if joc.is_some() {
+            let count = joc
+                .map_or(0, |params| usize::from(params.n_objects))
+                .min(MAX_OBJECTS);
             self.last_object_count = count;
             count
         } else {
             self.last_object_count.min(MAX_OBJECTS)
         };
-        let plan = self.resolve_bed_plan(frame, params)?;
         if frame.samples != FRAME_SAMPLES {
             return Err(DspError::SampleCount {
                 expected: FRAME_SAMPLES,
@@ -165,9 +158,13 @@ impl SpatialDecoder for Eac3JocDecoder {
             .get(lfe_index)
             .map(|plane| plane[..samples].to_vec());
 
+        let kernel_frame = match joc {
+            Some(params) => JocFrame::payload(params),
+            None => JocFrame::absent(core_channels, None),
+        };
         let mut output = vec![0.0f32; OUTPUT_CHANNELS * FRAME_SAMPLES];
         self.kernel
-            .process(&bed_planar, lfe.as_deref(), params, 1.0, &mut output)?;
+            .process_frame(&bed_planar, lfe.as_deref(), &kernel_frame, 1.0, &mut output)?;
 
         let output_channels = object_count + 1;
         let mut planes = Vec::with_capacity(output_channels);
