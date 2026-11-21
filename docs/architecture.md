@@ -38,7 +38,7 @@ DAMF master
 | `objectaudio-oamd` | single OAMD parser/writer; bed types live here, not in the IR | no |
 | `eac3joc` | E-AC-3 framing, EMDF containers, OAMD/ID11 and JOC/ID14 parsing | no |
 | `eac3joc-core-decoder` | E-AC-3 core PCM through libavcodec with DRC disabled | no |
-| `eac3joc-dsp` | QMF analysis, object matrix, synthesis and LFE handling | no |
+| `eac3joc-dsp` | QMF analysis, object matrix, synthesis, LFE handling and the frame state machine | no |
 | `truehd-atmos` | TrueHD Atmos parse/decode adapter producing the same IR | no |
 | `iec61937` | IEC 61937 carrier framing, E-AC-3 syncframes, TrueHD MAT extraction and relative timing | no |
 | `objectaudio-damf` | DAMF parser, inherited metadata resolver, shared channel layout, and CAF I/O | no |

@@ -26,6 +26,15 @@ complete when the next syncframe repeats a stream key, so output lags the input
 by one audio frame; `flush()` releases the last one. The parse stage never calls
 libavcodec and never touches QMF or matrix state.
 
+An ID14 payload that ends inside its object data, or that codes an `offset_ts`
+outside the 24 timeslots or not strictly increasing, keeps the header it did
+read — downmix configuration, clipgain, sequence counter — and reports the
+defect through `JocParams::status` instead of failing the stream. Only a payload
+whose header cannot be read, an unknown downmix configuration, or a Huffman walk
+that leaves its tree is an error. `clip_gain = 2^(x-4) * (1 + y/32)` ranges over
+0.0625..15.75, and `offset_ts` is the raw five-bit slot index, so the kernel
+compares it against the frame's timeslots directly.
+
 The ID11 payload is parsed by `objectaudio-oamd` into the object-only IR.
 `Eac3JocFrame` keeps the raw bytes for diagnostics and the EMDF sample offset;
 the GStreamer decoder attaches the resulting `SpatialPayload`, never OAMD
@@ -37,8 +46,19 @@ bytes.
   and `target_level=0`, sends each syncframe of an audio frame as a packet, and
   returns planar `f32` core PCM.
 - `eac3joc-dsp::JocKernel` performs 64-band analysis, parameter-band matrix
-  interpolation, synthesis, the 21-tap surround DC compensation and the
-  1217-sample LFE delay. The transforms use `rustfft`.
+  interpolation, synthesis, the 21-tap surround DC compensation, the 1217-sample
+  LFE delay and the frame state machine. The transforms use `rustfft`.
+- `JocKernel::process_frame` takes a `JocFrame`: the declared core channel count,
+  the optional phase-shift switch and the parsed payload. A frame whose payload
+  is incomplete, or that carries none at all, holds the previous matrices
+  instead of publishing silence. The first frame after a reset renders its
+  metadata as a hard cut rather than fading in from silence, and an object that
+  disappeared keeps publishing a zero matrix. A gap in the 10-bit sequence
+  counter, or a declared core-channel-count change, hard-cuts one frame; the
+  channel-count change also clears the LFE delay ring.
+- The analysis scalar is `clip_gain / 16` and the ×16 at the output cancels it.
+  The LFE applies the frame's full `clip_gain` as a 256-sample ramp before its
+  delay. Both keep the previous value while a frame is held.
 - `Eac3JocDecoder` maps the core lanes through the bed plan, runs the kernel and
   returns an object-only `SpatialFrame` (`ch0` = LFE, following channels are the
   stream's objects).
