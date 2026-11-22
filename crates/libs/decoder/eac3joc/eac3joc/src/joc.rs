@@ -311,6 +311,13 @@ pub fn parse_id14(payload: &[u8]) -> Result<JocParams> {
     let dmx_config_idx = reader.read(3) as u8;
     let num_objects_bits = reader.read(6) as u8;
     let ext_config_idx = reader.read(3) as u8;
+    // A payload that ends inside the fixed header cannot be reported as a
+    // damaged frame: the reader substitutes zeros for the fields it could not
+    // read, so the frame would carry a downmix configuration and an object count
+    // the bitstream never declared.
+    if reader.is_failed() {
+        return Err(Eac3JocError::BitstreamTruncated);
+    }
 
     let declared_objects = u32::from(num_objects_bits) + 1;
     let n_channels = num_channels_for_config(u32::from(dmx_config_idx)).ok_or_else(|| {
@@ -324,6 +331,9 @@ pub fn parse_id14(payload: &[u8]) -> Result<JocParams> {
     let clipgain_x_bits = reader.read(3) as u8;
     let clipgain_y_bits = reader.read(5) as u8;
     let seq_count = reader.read(10) as u16;
+    if reader.is_failed() {
+        return Err(Eac3JocError::BitstreamTruncated);
+    }
     let clipgain = clipgain(clipgain_x_bits, clipgain_y_bits);
 
     // The header is intact from here on. An object parameter that cannot be
@@ -792,6 +802,30 @@ mod tests {
         bits.push(2, 0b10); // a two-bit code with no leaf here: runs out
         let params = parse_id14(&bits.into_bytes()).unwrap();
         assert_eq!(params.status, JocPayloadStatus::Truncated);
+    }
+
+    #[test]
+    fn a_payload_shorter_than_the_fixed_header_is_an_error() {
+        // The fixed header is the 30-bit dmx configuration, object count,
+        // extension index, clipgain and sequence counter. A payload that ends
+        // inside it cannot be reported as a damaged frame: the reader would
+        // substitute zeros, so the frame would carry a downmix configuration and
+        // an object count the bitstream never declared.
+        for length in 0..=3 {
+            let payload = vec![0u8; length];
+            let error = parse_id14(&payload).expect_err("a short payload must fail");
+            assert!(
+                matches!(error, Eac3JocError::BitstreamTruncated),
+                "length {length}: {error:?}"
+            );
+        }
+        // A one-byte payload whose low bits spell a reserved configuration is
+        // still a truncation, not a syntax error.
+        let error = parse_id14(&[0xE0]).expect_err("a short payload must fail");
+        assert!(
+            matches!(error, Eac3JocError::BitstreamTruncated),
+            "{error:?}"
+        );
     }
 
     #[test]

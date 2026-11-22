@@ -114,24 +114,28 @@ impl SpatialDecoder for Eac3JocDecoder {
 
     fn decode(&mut self, frame: &Self::Frame) -> Result<SpatialFrame, Self::Error> {
         let joc = frame.joc.as_deref();
-        if let Some(joc) = joc {
+        // A payload the kernel cannot render must not update the stream state it
+        // keeps for later frames: the configuration and the object count stay at
+        // the last usable values, and the bed plan keeps the layout the parser
+        // trusted.
+        let usable = joc.filter(|params| params.status.is_complete());
+        if let Some(joc) = usable {
             self.last_config = joc.dmx_config_idx;
         }
         // The payload declares the core channel count; a frame without one takes
         // it from the bed plan the stream established.
-        let plan = self.resolve_bed_plan(frame, joc)?;
+        let plan = self.resolve_bed_plan(frame, usable)?;
         let core_channels = match joc {
             Some(joc) => usize::from(joc.n_channels),
             None => plan.core_channels(),
         };
-        let object_count = if joc.is_some() {
-            let count = joc
-                .map_or(0, |params| usize::from(params.n_objects))
-                .min(MAX_OBJECTS);
-            self.last_object_count = count;
-            count
-        } else {
-            self.last_object_count.min(MAX_OBJECTS)
+        let object_count = match usable {
+            Some(params) => {
+                let count = usize::from(params.n_objects).min(MAX_OBJECTS);
+                self.last_object_count = count;
+                count
+            }
+            None => self.last_object_count.min(MAX_OBJECTS),
         };
         if frame.samples != FRAME_SAMPLES {
             return Err(DspError::SampleCount {

@@ -311,6 +311,25 @@ impl JocKernel {
         if core_channels != CORE_CHANNELS && core_channels != MAX_CORE_CHANNELS {
             return Err(KernelError::InvalidCoreChannels(core_channels));
         }
+        // Every `JocFrame` field is public, so a caller can pair a payload with a
+        // frame that disagrees about the core layout. The matrix loops index the
+        // core lanes from the payload, so a mismatch would run past them.
+        if let Some(params) = frame.params {
+            if usize::from(params.n_channels) != core_channels {
+                return Err(KernelError::InvalidParameters(format!(
+                    "the payload declares {} core channels, the frame declares {core_channels}",
+                    params.n_channels
+                )));
+            }
+            if let Some(phase_shift) = frame.phase_shift
+                && phase_shift != params.phase_shift()
+            {
+                return Err(KernelError::InvalidParameters(format!(
+                    "the payload codes phase shift {}, the frame declares {phase_shift}",
+                    params.phase_shift()
+                )));
+            }
+        }
         let expected_bed = core_channels * FRAME_SAMPLES;
         if bed.len() != expected_bed {
             return Err(KernelError::InvalidBedLength {
@@ -349,26 +368,32 @@ impl JocKernel {
             validate_params(frame.params.expect("complete payload"))?;
         }
         // The declared channel count decides how the object syntax expands, so a
-        // change hard-cuts the frame and clears the state of the unused lanes.
-        let changed = self
+        // change resets the state of the lanes the new layout does not use and
+        // cuts one frame: the previous matrices were computed against the old
+        // layout and must not be held into the new one.
+        let layout_changed = self
             .previous_core_channels
             .is_some_and(|previous| previous != core_channels);
-        if changed {
+        if layout_changed {
             self.clear_unused_channels(core_channels);
+            // The delay ring holds PCM from the old layout; the clip gain ramp
+            // state stays so the gain does not retune.
+            self.lfe_delay = [0.0; LFE_DELAY];
         }
-        let status = if changed && payload.usable() {
+        // The sequence machine only learns about a layout change it can
+        // resynchronise on, i.e. one declared by a payload it can render.
+        let status = if layout_changed && payload.usable() {
             FrameStatus::ChannelCountChange
         } else {
             payload
         };
         let sequence = frame.params.map_or(0, |params| params.seq_count);
         self.advance_state(status, sequence);
-        if status == FrameStatus::ChannelCountChange {
-            // The delay ring holds PCM from the old layout; the clipgain ramp
-            // state stays so the gain does not retune.
-            self.lfe_delay = [0.0; LFE_DELAY];
-        }
-        let mode = self.select_mode(status);
+        let mode = if layout_changed {
+            FrameMode::HardCut
+        } else {
+            self.select_mode(status)
+        };
         if let Some(phase_shift) = frame.phase_shift {
             self.phase_shift_enabled = phase_shift;
         }
@@ -1267,6 +1292,79 @@ mod tests {
         damaged.objects[0].offset_ts = [TIMESLOTS as u8, 0];
         let held = render_third_frame(Some(&damaged));
         assert!(mismatch(&held, &steady) < 1e-6);
+    }
+
+    #[test]
+    fn a_layout_change_during_a_held_frame_still_cuts() {
+        // The declared core channel count changes on a frame that cannot render
+        // metadata. The previous matrices were computed against the old layout,
+        // so this must cut instead of holding them into the new one.
+        let mut kernel = JocKernel::new();
+        let five = constant_bed(CORE_CHANNELS, 0.5);
+        let seven = constant_bed(MAX_CORE_CHANNELS, 0.5);
+        let lfe = vec![0.0f32; FRAME_SAMPLES];
+        let mut output = vec![0.0f32; OUTPUT_CHANNELS * FRAME_SAMPLES];
+        kernel
+            .process_frame(
+                &five,
+                Some(&lfe),
+                &JocFrame::payload(&params(CORE_CHANNELS as u8, &[(0, 1.0)], 1)),
+                1.0,
+                &mut output,
+            )
+            .unwrap();
+        assert!(energy(&output, 1) > 0.0, "the first frame renders objects");
+        kernel
+            .process_frame(
+                &seven,
+                Some(&lfe),
+                &JocFrame::absent(MAX_CORE_CHANNELS, None),
+                1.0,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            energy(&output, 1),
+            0.0,
+            "the layout change must cut even without metadata"
+        );
+        assert_eq!(kernel.matrix_previous[0][0], [0.0; 64]);
+        assert!(kernel.matrix_previous_present[0]);
+        assert_eq!(kernel.previous_core_channels, Some(MAX_CORE_CHANNELS));
+    }
+
+    #[test]
+    fn an_inconsistent_frame_is_rejected_instead_of_panicking() {
+        // Every JocFrame field is public, so a caller can build a frame that
+        // disagrees with its own payload. The kernel must reject it rather than
+        // index past the core lanes.
+        let mut kernel = JocKernel::new();
+        let bed = silent_bed(CORE_CHANNELS);
+        let mut output = vec![0.0f32; OUTPUT_CHANNELS * FRAME_SAMPLES];
+        let base = params(CORE_CHANNELS as u8, &[(0, 1.0)], 1);
+
+        let mut oversized = base.clone();
+        oversized.n_channels = MAX_CORE_CHANNELS as u8 + 1;
+        let mismatched = JocFrame {
+            core_channels: CORE_CHANNELS,
+            phase_shift: None,
+            params: Some(&oversized),
+        };
+        assert!(matches!(
+            kernel.process_frame(&bed, None, &mismatched, 1.0, &mut output),
+            Err(KernelError::InvalidParameters(_))
+        ));
+
+        // The phase-shift switch has to agree with the payload's configuration.
+        let switched = JocFrame {
+            core_channels: CORE_CHANNELS,
+            phase_shift: Some(!base.phase_shift()),
+            params: Some(&base),
+        };
+        assert!(matches!(
+            kernel.process_frame(&bed, None, &switched, 1.0, &mut output),
+            Err(KernelError::InvalidParameters(_))
+        ));
     }
 
     #[test]

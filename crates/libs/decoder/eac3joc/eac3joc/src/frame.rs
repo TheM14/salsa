@@ -148,7 +148,12 @@ impl Eac3JocParser {
             .map(|header| header.samples())
             .unwrap_or(crate::joc::FRAME_SAMPLES);
 
-        let bed_plan = if let Some(params) = &joc {
+        // Only a payload the kernel can render describes the bed layout. A
+        // damaged one keeps the header it read but never decoded its object
+        // data, so it must not replace the plan the substream headers or the
+        // previous frames established.
+        let usable_joc = joc.as_ref().filter(|params| params.status.is_complete());
+        let bed_plan = if let Some(params) = usable_joc {
             let plan = compute_bed_plan(
                 core_header.as_ref(),
                 dependent_header.as_ref(),
@@ -188,5 +193,92 @@ impl Eac3JocParser {
 
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::joc::{JocObject, JocPayloadStatus};
+    use crate::transport::{Codec, SyncFrame};
+
+    fn header(acmod: u8, lfeon: bool) -> SyncFrameHeader {
+        SyncFrameHeader {
+            codec: Codec::Eac3,
+            stream_type: 0,
+            substream_id: 0,
+            acmod,
+            lfeon,
+            bsid: 16,
+            sample_rate: 48_000,
+            num_blocks_code: 3,
+            chanmap: None,
+            size: 0,
+        }
+    }
+
+    /// A payload whose fixed header is intact but whose object data is not.
+    fn damaged_payload(dmx_config_idx: u8) -> JocParams {
+        JocParams {
+            dmx_config_idx,
+            num_objects_bits: 0,
+            ext_config_idx: 0,
+            n_channels: crate::joc::num_channels_for_config(u32::from(dmx_config_idx))
+                .expect("supported configuration"),
+            n_objects: 1,
+            objects_clamped: false,
+            clipgain_x_bits: 4,
+            clipgain_y_bits: 0,
+            seq_count: 1,
+            clipgain: 1.0,
+            objects: [JocObject::default(); crate::joc::MAX_OBJECTS],
+            present_mask: 0,
+            data_end_bits: 0,
+            trailing_bits: 0,
+            status: JocPayloadStatus::Truncated,
+        }
+    }
+
+    /// A 5.1 core frame: six bed channels, so a five-lane JOC configuration.
+    fn five_one_frame(parser: &mut Eac3JocParser, joc: Option<JocParams>) {
+        parser.pending.push(SyncFrame {
+            header: header(7, true),
+            offset: 0,
+            bytes: Vec::new(),
+        });
+        parser.pending_joc = joc.map(Box::new);
+    }
+
+    #[test]
+    fn a_damaged_payload_does_not_replace_the_bed_plan() {
+        // The payload claims a seven-core-channel configuration, which does not
+        // match the six-channel 5.1 core. It cannot be rendered, so the layout
+        // has to come from the substream headers instead of the payload.
+        let mut parser = Eac3JocParser::new();
+        five_one_frame(&mut parser, Some(damaged_payload(4)));
+        let frame = parser.finish_pending().unwrap().expect("frame");
+        let plan = frame.bed_plan.expect("a plan");
+        assert_eq!(plan.channels, 6);
+        assert_eq!(plan.lfe_channel, Some(3));
+        // The trusted plan is what a later metadata-free frame reuses.
+        assert_eq!(
+            parser.last_bed_plan.map(|plan| plan.channels),
+            Some(6),
+            "the damaged payload must not be cached"
+        );
+    }
+
+    #[test]
+    fn a_complete_payload_is_still_trusted_for_the_bed_plan() {
+        // A renderable payload keeps deciding the layout, including the
+        // configuration-only plan a stream whose headers disagree with its
+        // downmix configuration gets. Only unrenderable payloads changed.
+        let mut parser = Eac3JocParser::new();
+        let mut complete = damaged_payload(4);
+        complete.status = JocPayloadStatus::Complete;
+        // A 5.1 core cannot supply the extra pair configuration 4 needs.
+        five_one_frame(&mut parser, Some(complete));
+        let frame = parser.finish_pending().unwrap().expect("frame");
+        assert_eq!(frame.bed_plan.expect("a plan").channels, 8);
     }
 }
