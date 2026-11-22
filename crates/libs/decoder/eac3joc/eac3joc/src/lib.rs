@@ -19,10 +19,10 @@ pub use bed::{
 pub use error::{Eac3JocError, Result};
 pub use frame::{Eac3JocFrame, Eac3JocParser};
 pub use joc::{
-    CORE_CHANNELS, FRAME_SAMPLES, JocObject, JocParams, MAX_CORE_CHANNELS, MAX_DPOINTS,
-    MAX_OBJECTS, MAX_PARAMETER_BANDS, check_id14_padding, num_bands_for_index,
-    num_channels_for_config, parse_id14, parse_syncframe, parse_syncframe_optional,
-    score_container_with_frame,
+    CORE_CHANNELS, FRAME_SAMPLES, JocObject, JocParams, JocPayloadStatus, MAX_CORE_CHANNELS,
+    MAX_DPOINTS, MAX_OBJECTS, MAX_PARAMETER_BANDS, TIMESLOTS, check_id14_padding,
+    num_bands_for_index, num_channels_for_config, parse_id14, parse_syncframe,
+    parse_syncframe_optional, score_container_with_frame,
 };
 pub use joc_bands::parameter_band_map;
 pub use transport::{

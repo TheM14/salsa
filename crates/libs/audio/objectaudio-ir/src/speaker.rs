@@ -283,6 +283,17 @@ pub const STANDARD_LAYOUTS: &[StandardLayout] = &[
         ],
     },
     StandardLayout {
+        name: "6.0",
+        channels: &[
+            SpeakerPosition::Left,
+            SpeakerPosition::Right,
+            SpeakerPosition::LeftSurround,
+            SpeakerPosition::RightSurround,
+            SpeakerPosition::LeftRearSurround,
+            SpeakerPosition::RightRearSurround,
+        ],
+    },
+    StandardLayout {
         name: "7.1",
         channels: &[
             SpeakerPosition::Left,
@@ -516,6 +527,22 @@ mod tests {
             assert!(names.insert(layout.name), "duplicate {}", layout.name);
             assert_eq!(layout_name_for(layout.channels), Some(layout.name));
         }
+    }
+
+    #[test]
+    fn a_six_zero_bed_resolves_to_its_name() {
+        // L R Ls Rs Lrs Rrs: the widest bed without a centre or an LFE.
+        let channels = [
+            SpeakerPosition::Left,
+            SpeakerPosition::Right,
+            SpeakerPosition::LeftSurround,
+            SpeakerPosition::RightSurround,
+            SpeakerPosition::LeftRearSurround,
+            SpeakerPosition::RightRearSurround,
+        ];
+        assert_eq!(layout_name_for(&channels), Some("6.0"));
+        // A side-only quad stays unnamed.
+        assert_eq!(layout_name_for(&channels[..4]), None);
     }
 
     #[test]

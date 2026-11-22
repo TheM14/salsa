@@ -111,7 +111,7 @@ pub fn encode_joc_per_object(
     w.write((nobj - 1) as u32, 6);
     w.write(0, 3); // joc_ext_config_idx = 0
     // joc_info()
-    w.write(4, 3); // gain = 1 + (0/32)·2^(4−4) = 1.0 (matches real Dolby streams)
+    w.write(4, 3); // clip_gain = 2^(4-4) * (1 + 0/32) = 1.0 (the unity code real streams carry)
     w.write(0, 5);
     w.write(seq as u32 & 0x3FF, 10); // joc_sequence_counter
     for &quant in quants {

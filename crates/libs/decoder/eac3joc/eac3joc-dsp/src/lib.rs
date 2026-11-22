@@ -7,4 +7,4 @@ mod qmf_tables;
 
 pub use decoder::{DspError, Eac3JocDecoder};
 pub use eac3joc::{FRAME_SAMPLES, MAX_CORE_CHANNELS, MAX_OBJECTS};
-pub use kernel::{JocKernel, KernelError, OUTPUT_CHANNELS};
+pub use kernel::{JocFrame, JocKernel, KernelError, OUTPUT_CHANNELS};
